@@ -23,9 +23,22 @@ def send_telegram(message):
 
 def get_binance_candles(symbol, interval='1m', limit=100):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
+    headers = {
+        "User-Agent": "Mozilla/5.0"
+    }
     try:
-        resp = requests.get(url, timeout=5).json()
-        df = pd.DataFrame(resp, columns=[
+        resp = requests.get(url, headers=headers, timeout=10)
+        if resp.status_code != 200:
+            print(f"❌ Binance returned status {resp.status_code} for {symbol}")
+            return pd.DataFrame()
+        data = resp.json()
+
+        # Ensure it's a list of lists (candles)
+        if not isinstance(data, list) or not data or not isinstance(data[0], list):
+            print(f"❌ Unexpected Binance response format for {symbol}: {data}")
+            return pd.DataFrame()
+
+        df = pd.DataFrame(data, columns=[
             "timestamp", "open", "high", "low", "close", "volume",
             "close_time", "quote_asset_volume", "number_of_trades",
             "taker_buy_base_vol", "taker_buy_quote_vol", "ignore"
@@ -37,6 +50,7 @@ def get_binance_candles(symbol, interval='1m', limit=100):
     except Exception as e:
         print(f"❌ Error fetching Binance candles for {symbol}: {e}")
         return pd.DataFrame()
+
 
 def get_coindcx_prices():
     url = "https://api.coindcx.com/exchange/ticker"
