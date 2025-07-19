@@ -132,8 +132,8 @@ def analyze_coin(symbol, coindcx_prices):
 
     print(message)
 
-    if "LONG" in signal_line or "SHORT" in signal_line:
-        send_telegram(message)
+    # if "LONG" in signal_line or "SHORT" in signal_line:
+    send_telegram(message)
 
 # --- Run the analysis ---
 if __name__ == "__main__":
