@@ -19,38 +19,29 @@ def send_telegram(message):
         'text': message,
         'parse_mode': 'Markdown'
     }
-    requests.post(url, data=payload)
+    try:
+        requests.post(url, data=payload, timeout=5)
+    except Exception as e:
+        print(f"❌ Telegram error: {e}")
 
 def get_binance_candles(symbol, interval='1m', limit=100):
     url = f"https://api.binance.com/api/v3/klines?symbol={symbol}&interval={interval}&limit={limit}"
-    headers = {
-        "User-Agent": "Mozilla/5.0"
-    }
     try:
-        resp = requests.get(url, headers=headers, timeout=10)
-        if resp.status_code != 200:
-            print(f"❌ Binance returned status {resp.status_code} for {symbol}")
-            return pd.DataFrame()
-        data = resp.json()
-
-        # Ensure it's a list of lists (candles)
-        if not isinstance(data, list) or not data or not isinstance(data[0], list):
-            print(f"❌ Unexpected Binance response format for {symbol}: {data}")
-            return pd.DataFrame()
-
-        df = pd.DataFrame(data, columns=[
+        resp = requests.get(url, timeout=5).json()
+        df = pd.DataFrame(resp, columns=[
             "timestamp", "open", "high", "low", "close", "volume",
             "close_time", "quote_asset_volume", "number_of_trades",
             "taker_buy_base_vol", "taker_buy_quote_vol", "ignore"
         ])
         df["close"] = df["close"].astype(float)
         df["volume"] = df["volume"].astype(float)
+        df["high"] = df["high"].astype(float)
+        df["low"] = df["low"].astype(float)
         df["timestamp"] = pd.to_datetime(df["timestamp"], unit='ms')
         return df
     except Exception as e:
         print(f"❌ Error fetching Binance candles for {symbol}: {e}")
         return pd.DataFrame()
-
 
 def get_coindcx_prices():
     url = "https://api.coindcx.com/exchange/ticker"
@@ -79,6 +70,22 @@ def calculate_rsi(series, period=14):
     rs = avg_gain / avg_loss
     return 100 - (100 / (1 + rs))
 
+def calculate_macd(df, fast=12, slow=26, signal=9):
+    exp1 = df["close"].ewm(span=fast, adjust=False).mean()
+    exp2 = df["close"].ewm(span=slow, adjust=False).mean()
+    macd_line = exp1 - exp2
+    signal_line = macd_line.ewm(span=signal, adjust=False).mean()
+    return macd_line, signal_line
+
+def calculate_atr(df, period=14):
+    df['prev_close'] = df['close'].shift()
+    tr = pd.concat([
+        df['high'] - df['low'],
+        abs(df['high'] - df['prev_close']),
+        abs(df['low'] - df['prev_close'])
+    ], axis=1).max(axis=1)
+    return tr.rolling(window=period).mean()
+
 def analyze_coin(symbol, coindcx_prices):
     df = get_binance_candles(symbol)
     if df.empty or len(df) < 50:
@@ -89,6 +96,8 @@ def analyze_coin(symbol, coindcx_prices):
     df["ema50"] = df["close"].ewm(span=50).mean()
     df["rsi"] = calculate_rsi(df["close"])
     df["vol_avg"] = df["volume"].rolling(window=20).mean()
+    df["macd"], df["macd_signal"] = calculate_macd(df)
+    df["atr"] = calculate_atr(df)
 
     last = df.iloc[-1]
     ema20 = last["ema20"]
@@ -96,6 +105,9 @@ def analyze_coin(symbol, coindcx_prices):
     rsi = round(last["rsi"], 1)
     vol = last["volume"]
     vol_avg = last["vol_avg"]
+    macd_line = last["macd"]
+    macd_signal = last["macd_signal"]
+    atr = last["atr"]
 
     live_price = coindcx_prices.get(symbol)
     if live_price is None:
@@ -122,17 +134,28 @@ def analyze_coin(symbol, coindcx_prices):
     vol_line = f"🔊 Volume: `{vol:.2f}` (Avg: `{vol_avg:.2f}`) → {'🔥 High Volume' if high_volume else 'Normal Volume'}"
 
     signal_line = "🎯 Strategy Signal: ❌ No signal"
+    entry_line = ""
+    sl_tp_line = ""
 
-    if above_ema20 and above_ema50 and rsi > 55 and trend_up:
-        if REQUIRE_HIGH_VOLUME and not high_volume:
-            signal_line = "🎯 Strategy Signal: ⚠️ LONG Valid but Low Volume"
-        else:
-            signal_line = "🎯 Strategy Signal: 📈 LONG Entry ✅"
-    elif below_ema20 and below_ema50 and rsi < 45 and trend_down:
-        if REQUIRE_HIGH_VOLUME and not high_volume:
-            signal_line = "🎯 Strategy Signal: ⚠️ SHORT Valid but Low Volume"
-        else:
-            signal_line = "🎯 Strategy Signal: 📉 SHORT Entry ✅"
+    if above_ema20 and above_ema50 and rsi > 55 and trend_up and macd_line > macd_signal:
+        entry_price_min = round(ema20, 4)
+        entry_price_max = round(ema20 * 1.002, 4)
+        stop_loss = round(live_price - (1.2 * atr), 4)
+        target_price = round(live_price + (2 * atr), 4)
+
+        signal_line = "🎯 Strategy Signal: 📈 LONG Entry ✅" if high_volume or not REQUIRE_HIGH_VOLUME else "🎯 Strategy Signal: ⚠️ LONG Valid but Low Volume"
+        entry_line = f"💰 *Entry Range*: `{entry_price_min}` → `{entry_price_max}`"
+        sl_tp_line = f"⛔ *SL*: `{stop_loss}` | 🎯 *TP*: `{target_price}`"
+
+    elif below_ema20 and below_ema50 and rsi < 45 and trend_down and macd_line < macd_signal:
+        entry_price_max = round(ema20, 4)
+        entry_price_min = round(ema20 * 0.998, 4)
+        stop_loss = round(live_price + (1.2 * atr), 4)
+        target_price = round(live_price - (2 * atr), 4)
+
+        signal_line = "🎯 Strategy Signal: 📉 SHORT Entry ✅" if high_volume or not REQUIRE_HIGH_VOLUME else "🎯 Strategy Signal: ⚠️ SHORT Valid but Low Volume"
+        entry_line = f"💰 *Entry Range*: `{entry_price_min}` → `{entry_price_max}`"
+        sl_tp_line = f"⛔ *SL*: `{stop_loss}` | 🎯 *TP*: `{target_price}`"
 
     message = "\n".join([
         header,
@@ -141,13 +164,15 @@ def analyze_coin(symbol, coindcx_prices):
         ema50_line,
         rsi_line,
         vol_line,
-        signal_line
+        signal_line,
+        entry_line,
+        sl_tp_line
     ])
 
     print(message)
 
-    # if "LONG" in signal_line or "SHORT" in signal_line:
-    send_telegram(message)
+    if "LONG" in signal_line or "SHORT" in signal_line:
+        send_telegram(message)
 
 # --- Run the analysis ---
 if __name__ == "__main__":
